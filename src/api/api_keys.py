@@ -1,10 +1,12 @@
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException,Query, Response
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from typing import Annotated
+from core.security import get_key_prefix, require_key_management
 from core.database import get_db
 from models.model import APIKey
 from schemas.APISchema import APIKeyCreate,APIKeyCreated,APIKeyRead
@@ -16,67 +18,104 @@ router = APIRouter(prefix="/v1/api-keys", tags=["API Keys"])
 @router.post("", response_model=APIKeyCreated, status_code=201)
 async def create_api_key(
     body: APIKeyCreate,
-    current: APIKey = Depends(get_current_key),
+    current_key: Annotated[
+        APIKey, Depends(require_key_management)
+    ],
     db: AsyncSession = Depends(get_db),
 ):
     raw_key = generate_api_key()
+    now = datetime.now(timezone.utc)
 
-    key = APIKey(
-        owner_id=current.owner_id,
+    expires_at = None
+    if body.expires_in_days is not None:
+        expires_at = now + timedelta(days=body.expires_in_days)
+
+    api_key = APIKey(
+        tenant_id=current_key.tenant_id,
         name=body.name,
-        key_prefix=raw_key[:12],
+        key_prefix=get_key_prefix(raw_key),
         key_hash=hash_api_key(raw_key),
+        scopes=body.scopes,
+        created_at=now,
+        expires_at=expires_at,
     )
 
-    db.add(key)
-    await db.commit()
-    await db.refresh(key)
+    db.add(api_key)
+   
+    try:
+        db.commit()
+        db.refresh(api_key)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to create API key",
+        )
 
-    # The raw secret is returned only once.
+    # The raw secret is returned only in this response.
     return APIKeyCreated(
-        id=key.id,
-        name=key.name,
+        id=api_key.id,
+        name=api_key.name,
         key=raw_key,
+        key_prefix=api_key.key_prefix,
+        scopes=api_key.scopes,
+        created_at=api_key.created_at,
+        expires_at=api_key.expires_at,
     )
 
 
 @router.get("", response_model=list[APIKeyRead])
 async def list_api_keys(
-    current: APIKey = Depends(get_current_key),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
+     current_key: Annotated[
+        APIKey, Depends(require_key_management)
+    ],
+    db: Session = Depends(get_db),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> list[APIKey]:
+    statement = (
         select(APIKey)
-        .where(APIKey.owner_id == current.owner_id)
-        .order_by(APIKey.id.desc())
+        .where(APIKey.tenant_id == current_key.tenant_id)
+        .order_by(APIKey.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
 
-    return result.scalars().all()
+    return list(db.scalars(statement).all())
 
 
-@router.delete("/{key_id}", status_code=204)
-async def revoke_api_key(
-    key_id: int,
-    current: APIKey = Depends(get_current_key),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
+
+@router.delete(
+    "/{key_id}",
+    status_code=204,
+)
+def revoke_api_key(
+    key_id: str,
+    current_key: Annotated[
+        APIKey, Depends(require_key_management)
+    ],
+    db: Session = Depends(get_db),
+) -> Response:
+    api_key = db.scalar(
         select(APIKey).where(
             APIKey.id == key_id,
-            APIKey.owner_id == current.owner_id,
+            APIKey.tenant_id == current_key.tenant_id,
         )
     )
-    key = result.scalar_one_or_none()
 
-    if not key:
+    if api_key is None:
+        # Same response whether the ID doesn't exist or belongs
+        # to another tenant.
         raise HTTPException(
             status_code=404,
             detail="API key not found",
         )
 
-    if key.revoked_at is None:
-        key.revoked_at = datetime.now(timezone.utc)
-        await db.commit()
+    if api_key.revoked_at is None:
+        api_key.revoked_at = datetime.now(timezone.utc)
+        db.commit()
+
+    return Response(status_code=204)
 
 '''
 The three endpoints are:

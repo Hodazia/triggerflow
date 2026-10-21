@@ -1,12 +1,16 @@
 from datetime import datetime, timezone
 from typing import Any
+import uuid
 
 from sqlalchemy import (
     DateTime,
+    ForeignKey,
     Integer,
     JSON,
     String,
     Text,
+    UniqueConstraint,
+    Index
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,18 +24,55 @@ def utc_now():
 class APIKey(Base):
     __tablename__ = "api_keys"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    owner_id: Mapped[str] = mapped_column(String(100), index=True)
-    name: Mapped[str] = mapped_column(String(100))
-    key_prefix: Mapped[str] = mapped_column(String(16))
+    id: Mapped[str] = mapped_column(String(36) , primary_key=True, default = lambda: str(uuid.uuid4()))
+
+    #used for customer isolation
+    tenant_id: Mapped[str] = mapped_column(String(100),
+     ForeignKey("tenants.id", ondelete="CASCADE") , 
+     nullable=False,index=True)
+
+     # e.g. production backend
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    # let the customer identify a key in the dashboard without its full name
+    key_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
+
+    #Store only the hash of the complete API Key
     key_hash: Mapped[str] = mapped_column(
-        String(64), unique=True, index=True
+        String(64), nullable=False
+    )
+
+    # Example: ["events:write", "keys:manage"]
+    scopes: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now
+        DateTime(timezone=True), 
+        nullable=False,
+        default=utc_now
     )
+
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "key_hash",
+            name="uq_api_keys_key_hash",
+        ),
+        Index(
+            "ix_api_keys_tenant_created",
+            "tenant_id",
+            "created_at",
+        ),
     )
 
 
