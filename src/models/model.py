@@ -10,48 +10,62 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    Index
+    Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from core.database import Base
+from src.core.database import Base
 
 
 def utc_now():
     return datetime.now(timezone.utc)
 
 
+class Tenant(Base):
+    __tablename__ = "tenants"
+
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+
 class APIKey(Base):
     __tablename__ = "api_keys"
 
-    id: Mapped[str] = mapped_column(String(36) , primary_key=True, default = lambda: str(uuid.uuid4()))
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
 
-    #used for customer isolation
-    tenant_id: Mapped[str] = mapped_column(String(100),
-     ForeignKey("tenants.id", ondelete="CASCADE") , 
-     nullable=False,index=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
-     # e.g. production backend
     name: Mapped[str] = mapped_column(String(100), nullable=False)
 
-    # let the customer identify a key in the dashboard without its full name
     key_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
 
-    #Store only the hash of the complete API Key
     key_hash: Mapped[str] = mapped_column(
         String(64), nullable=False
     )
 
-    # Example: ["events:write", "keys:manage"]
     scopes: Mapped[list[str]] = mapped_column(
         JSON,
         nullable=False,
         default=list,
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), 
+        DateTime(timezone=True),
         nullable=False,
-        default=utc_now
+        default=utc_now,
     )
 
     expires_at: Mapped[datetime | None] = mapped_column(
@@ -98,4 +112,78 @@ class Job(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now
+    )
+
+
+
+class WebhookEndpoint(Base):
+    __tablename__ = "webhook_endpoints"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # production-orders-webhook
+    name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    # url that receives http post requests
+    url: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    # the events this endpoint wants to receive.
+    subscribed_events: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+
+    # allows delivery to be disabled without deleting the record.
+    is_active: Mapped[bool] = mapped_column(
+        nullable=False,
+        default=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        onupdate=utc_now,
+    )
+    
+    # records when an endpoint was removed from active use.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_webhook_endpoints_tenant_created",
+            "tenant_id",
+            "created_at",
+        ),
+        Index(
+            "ix_webhook_endpoints_tenant_active",
+            "tenant_id",
+            "is_active",
+        ),
     )

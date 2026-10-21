@@ -1,16 +1,19 @@
-
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException,Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Annotated
-from core.security import get_key_prefix, require_key_management
-from core.database import get_db
-from models.model import APIKey
-from schemas.APISchema import APIKeyCreate,APIKeyCreated,APIKeyRead
-from core.security import generate_api_key, get_current_key, hash_api_key
+
+from src.core.security import (
+    generate_api_key,
+    get_key_prefix,
+    hash_api_key,
+    require_key_management,
+)
+from src.core.database import get_db
+from src.models.model import APIKey
+from src.schemas.APISchema import APIKeyCreate, APIKeyCreated, APIKeyRead
 
 router = APIRouter(prefix="/v1/api-keys", tags=["API Keys"])
 
@@ -41,18 +44,17 @@ async def create_api_key(
     )
 
     db.add(api_key)
-   
+
     try:
-        db.commit()
-        db.refresh(api_key)
+        await db.commit()
+        await db.refresh(api_key)
     except Exception:
-        db.rollback()
+        await db.rollback()
         raise HTTPException(
             status_code=500,
             detail="Unable to create API key",
         )
 
-    # The raw secret is returned only in this response.
     return APIKeyCreated(
         id=api_key.id,
         name=api_key.name,
@@ -66,61 +68,55 @@ async def create_api_key(
 
 @router.get("", response_model=list[APIKeyRead])
 async def list_api_keys(
-     current_key: Annotated[
+    current_key: Annotated[
         APIKey, Depends(require_key_management)
     ],
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> list[APIKey]:
     statement = (
         select(APIKey)
-        .where(APIKey.tenant_id == current_key.tenant_id)
+        .where(
+            APIKey.tenant_id == current_key.tenant_id,
+            APIKey.revoked_at.is_(None),
+        )
         .order_by(APIKey.created_at.desc())
         .limit(limit)
         .offset(offset)
     )
 
-    return list(db.scalars(statement).all())
-
+    result = await db.execute(statement)
+    return list(result.scalars().all())
 
 
 @router.delete(
     "/{key_id}",
     status_code=204,
 )
-def revoke_api_key(
+async def revoke_api_key(
     key_id: str,
     current_key: Annotated[
         APIKey, Depends(require_key_management)
     ],
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
-    api_key = db.scalar(
+    result = await db.execute(
         select(APIKey).where(
-            APIKey.id == key_id,
+            APIKey.id == key_id.strip(),
             APIKey.tenant_id == current_key.tenant_id,
+            APIKey.revoked_at.is_(None),
         )
     )
+    api_key = result.scalar_one_or_none()
 
     if api_key is None:
-        # Same response whether the ID doesn't exist or belongs
-        # to another tenant.
         raise HTTPException(
             status_code=404,
             detail="API key not found",
         )
 
-    if api_key.revoked_at is None:
-        api_key.revoked_at = datetime.now(timezone.utc)
-        db.commit()
+    api_key.revoked_at = datetime.now(timezone.utc)
+    await db.commit()
 
     return Response(status_code=204)
-
-'''
-The three endpoints are:
-- POST /v1/api-keys — create another API key for the same owner.
-- GET /v1/api-keys — list keys without revealing their secrets.
-- DELETE /v1/api-keys/{key_id} — revoke a key.
-
-'''

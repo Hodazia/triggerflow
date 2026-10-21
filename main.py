@@ -3,9 +3,11 @@ import uvicorn
 from fastapi import FastAPI
 
 from src.api.api_keys import router as api_keys_router
+from src.api.endpoints_webhook import router as webhook_endpoints_router
 from src.core.security import seed_bootstrap_key
 from src.core.database import Base, engine, SessionLocal
 from src.core.config import settings
+from src.models import model as models  # noqa: F401 — register ORM tables
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -35,6 +37,7 @@ app = FastAPI(
 )
 
 app.include_router(api_keys_router)
+app.include_router(webhook_endpoints_router)
 
 @app.get("/health/live", tags=["Health"])
 async def liveness():

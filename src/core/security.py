@@ -7,10 +7,9 @@ from fastapi import Depends, HTTPException, Header
 from fastapi.security import APIKeyHeader
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
-from core.database import get_db
-from models.model import APIKey
+from src.core.database import get_db
+from src.models.model import APIKey, Tenant
 
 
 api_key_header = APIKeyHeader(
@@ -36,6 +35,13 @@ def generate_api_key() -> str:
     return "tf_" + secrets.token_urlsafe(32)
 
 
+def get_key_prefix(raw_key: str):
+    '''
+    stores only a short, non-secret identifier
+    '''
+    return raw_key[:16]
+
+
 def unauthorized() -> HTTPException:
     return HTTPException(
         status_code=401,
@@ -44,21 +50,22 @@ def unauthorized() -> HTTPException:
     )
 
 
-def get_current_api_key(
+async def get_current_api_key(
     raw_key: Annotated[
         str | None,
         Header(alias="X-API-Key"),
     ] = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> APIKey:
     if not raw_key:
         raise unauthorized()
 
     key_hash = hash_api_key(raw_key)
 
-    api_key = db.scalar(
+    result = await db.execute(
         select(APIKey).where(APIKey.key_hash == key_hash)
     )
+    api_key = result.scalar_one_or_none()
 
     if api_key is None or api_key.revoked_at is not None:
         raise unauthorized()
@@ -66,8 +73,6 @@ def get_current_api_key(
     now = datetime.now(timezone.utc)
 
     if api_key.expires_at is not None:
-        # Some database drivers return naive datetimes for
-        # timezone-aware columns, so normalize before comparison.
         expires_at = api_key.expires_at
 
         if expires_at.tzinfo is None:
@@ -78,10 +83,11 @@ def get_current_api_key(
 
     return api_key
 
-def require_key_management(
+
+async def require_key_management(
     current_key: APIKey = Depends(get_current_api_key),
 ) -> APIKey:
-    if "keys:manage" not in current_key.scopes:
+    if "keys:manage" not in (current_key.scopes or []):
         raise HTTPException(
             status_code=403,
             detail="This API key does not have keys:manage permission",
@@ -90,9 +96,28 @@ def require_key_management(
     return current_key
 
 
+async def require_endpoint_management(
+    current_key: APIKey = Depends(get_current_api_key),
+) -> APIKey:
+    if "endpoints:manage" not in (current_key.scopes or []):
+        raise HTTPException(
+            status_code=403,
+            detail="This API key does not have endpoints:manage permission",
+        )
+
+    return current_key
+
+
+BOOTSTRAP_SCOPES = ["keys:manage", "endpoints:manage"]
+
 
 async def seed_bootstrap_key(db: AsyncSession, raw_key: str):
     key_hash = hash_api_key(raw_key)
+
+    tenant = await db.get(Tenant, "demo")
+    if tenant is None:
+        db.add(Tenant(id="demo", name="Demo"))
+        await db.flush()
 
     result = await db.execute(
         select(APIKey).where(APIKey.key_hash == key_hash)
@@ -100,42 +125,22 @@ async def seed_bootstrap_key(db: AsyncSession, raw_key: str):
     existing = result.scalar_one_or_none()
 
     if existing:
+        current_scopes = list(existing.scopes or [])
+        missing = [
+            scope for scope in BOOTSTRAP_SCOPES if scope not in current_scopes
+        ]
+        if missing:
+            existing.scopes = current_scopes + missing
+            await db.commit()
         return
 
     db.add(
         APIKey(
-            owner_id="demo",
+            tenant_id="demo",
             name="Bootstrap key",
-            key_prefix=raw_key[:12],
+            key_prefix=get_key_prefix(raw_key),
             key_hash=key_hash,
+            scopes=list(BOOTSTRAP_SCOPES),
         )
     )
     await db.commit()
-
-
-def get_key_prefix(raw_key:str):
-    '''
-    stores only a short, non-secret identifier
-    '''
-    return raw_key[:16]
-
-'''
-When a request arrives with X-API-Key, TriggerFlow hashes the supplied key and looks up the matching hash in the database. 
-It never needs to retrieve the original secret.
-
-GET /v1/api-keys
-X-API-Key: tf_live_example_secret
-
-
-The backend:
-1. Reads the X-API-Key header.
-2. Hashes the supplied secret.
-3. Looks up the matching record in PostgreSQL.
-4. Rejects the request if the key doesn't exist, has expired, or has been revoked.
-5. Checks that the key has keys:manage.
-6. Makes the authenticated key's tenant_id available to the route.
-The distinction between 401 and 403 is useful:
-- 401 Unauthorized: credentials are missing or invalid.
-- 403 Forbidden: credentials are valid but lack the required permission.
-
-'''

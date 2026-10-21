@@ -50,7 +50,7 @@ class APIKeyCreate(BaseModel):
         return scopes
 
 class APIKeyCreated(BaseModel):
-    id: int
+    id: str
     name: str
     key: str
     key_prefix: str
@@ -61,7 +61,7 @@ class APIKeyCreated(BaseModel):
 
 class APIKeyRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    id: int
+    id: str
     name: str
     key_prefix: str
     scopes: list[str]
